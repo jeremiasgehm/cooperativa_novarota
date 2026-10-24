@@ -6,7 +6,7 @@ from delta.tables import DeltaTable
 
 def compute_hash_diff(df: DataFrame, business_cols: list) -> DataFrame:
     """
-    calcula hash SHA-256 dos campos de negocio para identificar alteracoes
+    calcula hash SH-256 dos campos de negocio para identificar alteracoes
     """
     return df.withColumn(
         "_hash_diff",
@@ -30,8 +30,10 @@ def execute_scd2_merge(
     primary_key: str = "id_cliente",
 ):
     """
-    SCD t2 desacoplado (Merge + Insert de novos),
-    garantindo que nunca ocorra erro de múltiplas linhas
+    SCD t2 robusto:
+    1- Se nada mudou, nao faz nada
+    2- Se houve alteracao, expira a versao ativa anterior
+    3- Insere a nova versao ou registros novos via append.
     """
     target_delta = DeltaTable.forName(spark, target_table_name)
     target_df = target_delta.toDF()
@@ -58,22 +60,24 @@ def execute_scd2_merge(
             F.col(f"src.{primary_key}").alias(primary_key),
             F.col(f"src.{order_col}").alias("dt_expiracao"),
         )
+        .dropDuplicates([primary_key])
     )
 
-    (
-        target_delta.alias("tgt")
-        .merge(
-            source=records_changed.alias("src"),
-            condition=f"tgt.{primary_key} = src.{primary_key} AND tgt.flag_ativo = true",
+    if not records_changed.isEmpty():
+        (
+            target_delta.alias("tgt")
+            .merge(
+                source=records_changed.alias("src"),
+                condition=f"tgt.{primary_key} = src.{primary_key} AND tgt.flag_ativo = true",
+            )
+            .whenMatchedUpdate(
+                set={
+                    "flag_ativo": F.lit(False),
+                    "data_fim_vigencia": F.col("src.dt_expiracao"),
+                }
+            )
+            .execute()
         )
-        .whenMatchedUpdate(
-            set={
-                "flag_ativo": F.lit(False),
-                "data_fim_vigencia": F.col("src.dt_expiracao"),
-            }
-        )
-        .execute()
-    )
 
     existing_unchanged = (
         latest_updates.alias("src")
@@ -93,7 +97,7 @@ def execute_scd2_merge(
         .withColumn("_batch_id", F.lit("silver_scd2"))
     )
 
-    if records_to_insert.count() > 0:
+    if not records_to_insert.isEmpty():
         target_cols = [c for c in spark.table(target_table_name).columns]
         records_to_insert.select(*target_cols).write.format("delta").mode(
             "append"
