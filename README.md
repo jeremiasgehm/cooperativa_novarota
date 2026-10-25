@@ -41,6 +41,8 @@ O ambiente opera sob o namespace de tres niveis do Unity Catalog (`novarota.<sch
 
    - docs/decisions.md: registros formais de decisao arquitetural
 
+!["Desenho da arquitetura"](/Workspace/Users/jeremiasgehm@gmail.com/cooperativa_novarota/docs/evidences/arquitetura.png)
+
 ---
 
 ## O que você irá encontrar nesse repostório
