@@ -1,102 +1,118 @@
-# Arquitetura Técnica e Governança Lakehouse
+# Arquitetura Tecnica e Governanca
 
-Este documento apresenta o desenho técnico da plataforma Lakehouse da **Cooperativa Nova Rota**, descrevendo a estrutura de dados no Unity Catalog, o fluxo de linhagem ponta a ponta, os mecanismos de resiliência e a modularização do código.
+Este documento apresenta o desenho tecnico da plataforma Lakehouse da Cooperativa Nova Rota, detalhando a topologia de dados no Unity Catalog, o fluxo de linhagem ponta a ponta, os mecanismos de resiliencia, o modelo de governanca e a modularizacao do codigo.
 
----
-
-## 1. Topologia de Dados e Governança no Unity Catalog
-
-A plataforma foi implementada utilizando o namespace de três níveis do Databricks Unity Catalog (`novarota.<camada>.<tabela>`). Essa abordagem elimina o acoplamento a caminhos físicos de armazenamento (*storage locations*) e centraliza o controlo de acessos, auditoria e linhagem técnica:
-
-```
-                           novarota 
-                         (Catálogo)
-       ┌──────────────────────┼──────────────────────┐
-       ▼                      ▼                      ▼
-    bronze                  silver                 gold
-(Raw / Ingestão)       (Limpeza / SCD2)       (Data Products)
-```
+!["Arquitetura"](/Workspace/Users/jeremiasgehm@gmail.com/cooperativa_novarota/docs/evidences/arquitetura.png)
 
 ---
 
-### A. Camada Bronze (`novarota.bronze`)
-* **Objetivo:** Ingestão bruta, append-only e imutável das origens transacionais e streams de CDC (Change Data Capture).
-* **Mecanismo:** Databricks Auto Loader (`format("cloudFiles")`), que utiliza notificações e logs de ficheiros no storage para processamento incremental eficiente.
-* **Schema Evolution & Rescue:** Inclusão nativa da coluna `_rescued_data`, prevenindo a falha do pipeline caso surjam novos atributos ou formatos inesperados.
-* **Metadados Técnicos de Auditoria Forense:**
-  * `_timestamp_ingestao`: Timestamp UTC preciso da execução da micro-tarefa.
-  * `_arquivo_origem`: Caminho completo de origem do ficheiro processado no storage.
-  * `_batch_id`: Identificador da execução do job para idempotência.
-  * `_hash_linha`: Hash SHA-256 do registo bruto para auditoria e rastreio de duplicados.
-* **Tabelas Geradas:**
-  * `bronze_clientes_cdc`: Histórico bruto de atualizações cadastrais de clientes.
-  * `bronze_contas_cdc`: Histórico bruto de abertura e estado das contas.
-  * `bronze_cartoes_cdc`: Relação transacional e operacional de cartões.
-  * `bronze_transacoes`: Eventos transacionais de movimentação financeira.
+## 1- Topologia de Dados e Governanca no Unity Catalog
 
----
+A plataforma foi implementada utilizando o namespace formal de tres niveis do Databricks Unity Catalog (`novarota.<camada>.<tabela>`). Essa abordagem desacopla o codigo de caminhos fisicos de armazenamento (*storage locations*) e centraliza o controle de acessos (RBAC), auditoria e linhagem tecnica:
 
-### B. Camada Silver (`novarota.silver`)
-* **Objetivo:** Higienização, tipagem estrita, aplicação de contratos de qualidade de dados (*Data Contracts*) e conformação dimensional histórica.
-* **Roteamento de Não-Conformidades (Quarentena):** Registos com desvios contratuais (ex.: campos obrigatórios nulos, valores fora dos limites) são direcionados para tabelas de quarentena com enriquecimento de `motivo_quarentena` e `data_quarentena`.
-* **Histórico Cadastral (SCD Tipo 2):** Implementação desacoplada (*Expire + Append*) para rastrear a evolução dos cooperados ao longo do tempo.
-* **Tabelas Geradas:**
-  * `dim_cliente_scd2`: Dimensão cooperado com colunas de vigência (`data_inicio_vigencia`, `data_fim_vigencia`, `flag_ativo`) e hash de negócio (`_hash_diff`).
-  * `silver_transacoes`: Transações validadas, desduplicadas e conciliadas financeiramente.
-  * `quarentena_clientes`: Registos de cooperados rejeitados pelas regras de qualidade.
-  * `quarentena_transacoes`: Transações inválidas retidas para auditoria e análise de causa-raiz.
-
----
-
-### C. Camada Gold (`novarota.gold`)
-* **Objetivo:** Disponibilização de *Data Products* analíticos prontos para BI, análises ad-hoc e consumo direto por equipas de negócio.
-* **Linhagem Referencial Complexa:** Resolução em cascata para associar eventos de transação ao cooperado correto:
-  $$\text{silver\_transacoes} \xrightarrow{\text{id\_cartao}} \text{bronze\_cartoes\_cdc} \xrightarrow{\text{id\_conta}} \text{bronze\_contas_cdc} \xrightarrow{\text{id\_cliente}} \text{dim\_cliente\_scd2}$$
-* **Tabelas Geradas:**
-  * `gold_metricas_cooperados`: Visão analítica 360 do cooperado (total de transações aprovadas, volume financeiro líquido transacionado, ticket médio e data do último movimento).
-  * `gold_desempenho_canais`: Indicadores volumétricos e liquidez por canal de operação (ATM, POS, Internet Banking, Mobile) e estado transacional.
-
----
-
-## 2. Diagrama de Linhagem e Dependências (DAG)
-```
-                                  [Fontes de Dados / CDC]
-                                            │
-                                            ▼ 
-                                 (Auto Loader cloudFiles)
-                                ┌──────────────────────────┐
-                                │ novarota.bronze.*        │
-                                │  - bronze_clientes_cd    │
-                                │  - bronze_contas_cdc     │
-                                │  - bronze_cartoes_cdc    │
-                                │  - bronze_transacoes     │
-                                └────────────┬─────────────┘
-                                             │
-                                    ┌────────┴────────┐
-                                    ▼                 ▼
-                                (Validação)      (Rejeições)
-                        ┌───────────────────┐ ┌─────────────────────────┐
-                        │ novarota.silver   │ │ novarota.silver         │
-                        │  - dim_cliente_   │ │  - quarentena_clientes  │
-                        │    scd2           │ │  - quarentena_transacoes│
-                        │  - silver_        │ └─────────────────────────┘
-                        │    transacoes     │
-                        └─────────┬─────────┘
-                                  │
-                                  ▼ 
-                (Resolução de Chaves e Agregações)
-                ┌─────────────────────────────────┐
-                │ novarota.gold                   │
-                │  - gold_metricas_cooperados     │
-                │  - gold_desempenho_canais       │
-                └─────────────────────────────────┘
+```text
+                           novarota
+                          (Catalogo)
+        ┌──────────────────────┼──────────────────────┐
+        ▼                      ▼                      ▼
+     bronze                  silver                 gold
+(Raw / Ingestao)        (Limpeza / SCD2)       (Data Products)
 ```
 
-## 3. Modularização do Código (`src/`)
+### Camada Bronze (`novarota.bronze`)
 
-O projeto prioriza a separação estrita entre lógica pura (Python) e orquestração (Notebooks), viabilizando testes unitários e reutilização de código:
+- **Objetivo:** Ingestao bruta, append-only e imutavel das origens transacionais e fluxos de Change Data Capture (CDC).
+- **Mecanismo:** Databricks Auto Loader (`format("cloudFiles")`), operando por notificacoes de eventos e logs de arquivos no storage para ingestao incremental de baixa latencia.
+- **Schema Evolution & Rescue:** Inclusao automatica da coluna tecnica `_rescued_data`, prevenindo falhas de pipeline diante de colunas nao mapeadas ou dados corrompidos.
+- **Metadados Tecnicos de Auditoria Forense:**
+    - `_timestamp_ingestao`: Timestamp UTC preciso da execucao da micro-tarefa.
+    - `_arquivo_origem`: Caminho completo do arquivo de origem no storage.
+    - `_batch_id`: Identificador de execucao do lote para controle de idempotencia.
+    - `_hash_linha`: Hash criptografico SHA-256 do registro bruto para verificacao de integridade e rastreabilidade de duplicidades.
+- **Tabelas Geradas:**
+    - `bronze_clientes_cdc`: Historico bruto de mutacoes cadastrais de cooperados.
+    - `bronze_contas_cdc`: Historico bruto de abertura e estado operacional das contas.
+    - `bronze_cartoes_cdc`: Cadastro e atualizacao de cartoes vinculados.
+    - `bronze_transacoes`: Eventos transacionais de autorizacao e movimentacao financeira.
+    - `bronze_estornos`: Eventos operacionais de cancelamento e devolucao transacional.
+    - `bronze_eventos_risco`: Eventos de alerta de seguranca e prevencao a fraudes.
 
-* **`src/bronze/`**: Funções reutilizáveis para ingestão incremental com Auto Loader e injeção automática de metadados forenses.
-* **`src/silver/contracts.py`**: Lógica de aplicação dos contratos de dados, separação de registos íntegros e roteamento para quarentena.
-* **`src/silver/scd2.py`**: Algoritmo desacoplado de SCD Tipo 2 (*Expire + Append*), garantindo ausência de colisões de múltiplas linhas no Delta Lake.
-* **`src/gold/aggregations.py`**: Resolução temporal da linhagem CDC e construção dos Data Products analíticos.
+### Camada Silver (`novarota.silver`)
+
+- **Objetivo:** Higienizacao, tipagem estrita, validacao declarativa de contratos de dados (*Data Contracts*) e historizacao dimensional via SCD Tipo 2.
+- **Roteamento de Nao Conformidades (Quarentena):** Registros com desvios contratuais (CPFs malformatados, valores de renda inconsistentes ou status operacionais invalidos) sao segregados para tabelas de quarentena sem interrupcao do processamento (*non-breaking pipeline*), enriquecidos com `motivo_quarentena` e `data_quarentena`.
+- **Historico Cadastral (SCD Tipo 2):** Implementacao desacoplada no padrao Expire + Append, eliminando o erro de concorrencia `DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE` por meio de deduplicacao analitica por janela e deteccao de alteracao via `_hash_diff` (SHA-256).
+- **Tabelas Geradas:**
+    - `dim_cliente_scd2`: Dimensao historica de cooperados com colunas de vigencia (`data_inicio_vigencia`, `data_fim_vigencia`, `flag_ativo`) e hash deterministico (`_hash_diff`).
+    - `silver_transacoes`: Transacoes conformadas, tipadas e deduplicadas.
+    - `quarentena_clientes`: Registros cadastrais reprovados nas regras contratuais.
+    - `quarentena_transacoes`: Transacoes com inconsistencias operacionais retidas para auditoria.
+
+### Camada Gold (`novarota.gold`)
+
+- **Objetivo:** Materializacao de Data Products analiticos de alto desempenho orientados a consumo executivo, relatorios operacionais, investigacao de fraude e treinamento de modelos de Machine Learning.
+- **Resolucao Temporal e Regras de Negocio:**
+    - Resolucao relacional em cascata: `transacao -> cartao -> conta -> cooperado`.
+    - *Point-in-time join* dimensional: vinculo entre a transacao e a versao cadastral do cooperado que estava em vigencia na data exata da transacao (`data_transacao >= data_inicio_vigencia AND data_transacao < coalesce(data_fim_vigencia, '9999-12-31')`).
+    - Tratamento de Estornos: Abatimento integral no calculo contabilidade liquida (`valor_liquido = 0.00` para transacoes com flag de estorno confirmado), preservando `valor_bruto` para conciliacao.
+    - Liquid Clustering: Otimizacao de I/O em `gold_fato_transacao` atraves de agrupamento multidimensional (`CLUSTER BY (data_referencia, id_cliente)`) com compactacao via `OPTIMIZE`.
+- **Tabelas Geradas:**
+    - `gold_fato_transacao`: Tabela de fatos com grao transacional unitario, snapshots cadastrais historicos e flags de risco e estorno consolidados.
+    - `gold_cliente_mes`: Indicadores agregados mensais por cooperado (volumetria bruta, volume liquido, ticket medio e canais utilizados).
+    - `gold_indicadores_risco`: Painel consolidado mensal por canal avaliando taxas de chargeback, proporcao de estornos e concentracao de alertas de risco.
+    - `gold_features_cliente`: Feature store analitica com metricas comportamentais (desvio padrao amostral de gastos, razao de recusa, gasto maximo e recencia).
+
+## 2- Diagrama de Linhagem e Dependencias (DAG)
+
+```
+                                  [Fontes Transacionais / CDC]
+                                                |
+                                                v Auto Loader (cloudFiles)
+                                ┌───────────────────────────────┐
+                                │ novarota.bronze.*             │
+                                │  - bronze_clientes_cdc        │
+                                │  - bronze_contas_cdc          │
+                                │  - bronze_cartoes_cdc         │
+                                │  - bronze_transacoes          │
+                                │  - bronze_estornos            │
+                                │  - bronze_eventos_risco       │
+                                └───────────────┬───────────────┘
+                                                |
+                                ┌───────────────┴───────────────┐
+                                v                               v
+                        (Contratos Validos)             (Falha Contratual)
+                ┌───────────────────────────────┐ ┌───────────────────────────────┐
+                │ novarota.silver.*             │ │ novarota.silver.*             │
+                │  - dim_cliente_scd2           │ │  - quarentena_clientes        │
+                │  - silver_transacoes          │ │  - quarentena_transacoes      │
+                └───────────────┬───────────────┘ └───────────────────────────────┘
+                                |
+                                v Resolucao de Chaves, Point-in-Time Join & Agregacoes
+                ┌─────────────────────────────────────────────────────────────────┐
+                │ novarota.gold.*                                                 │
+                │  - gold_fato_transacao        (Clusterizada: data, id_cliente) │
+                │  - gold_cliente_mes           (Grao mensal por cooperado)       │
+                │  - gold_indicadores_risco     (Grao mensal por canal de risco)  │
+                │  - gold_features_cliente      (Feature Store para ML)           │
+                └─────────────────────────────────────────────────────────────────┘
+```
+
+## 3- Modelo de Governanca e Controle de Acessos (RBAC)
+
+O controle de acesso segue o principio do menor privilegio (*Least Privilege*), delimitando o acesso as camadas com base nos perfis funcionais:
+
+| **Papel (Role)** | **Escopo Bronze** | **Escopo Silver** | **Escopo Gold** | **Finalidade** |
+| --- | --- | --- | --- | --- |
+| **`data_engineers`** | ALL PRIVILEGES | ALL PRIVILEGES | ALL PRIVILEGES | Manutencao de pipelines, ingestao e transformacoes. |
+| **`data_scientists`** | Sem Acesso | SELECT (dimensoes) | USAGE, SELECT | Exploracao de features e desenvolvimento de modelos. |
+| **`bi_analysts`** | Sem Acesso | Sem Acesso | USAGE, SELECT | Construcao de dashboards, relatorios e consultas SQL. |
+
+## 4- Modularizacao do Codigo (`src/`)
+
+O projeto prioriza a separacao estrita entre logica deterministica em pacotes Python e cadernos de orquestracao, viabilizando execucao de testes unitarios desacoplados:
+
+- **`src/bronze/`**: Metodos de ingestao incremental com Auto Loader e adicao padronizada de colunas de metadados de auditoria.
+- **`src/silver/contracts.py`**: Validacao de contratos de dados e bifurcacao de registros para quarentena tecnica.
+- **`src/silver/scd2.py`**: Algoritmo SCD Tipo 2 desacoplado (Expire + Append) com deteccao de mudanca via hash SHA-256.
+- **`src/gold/aggregations.py`**: Resolucao dimensional em cascata, point-in-time join com SCD2, tratamento contabilidade de estornos e construcao dos quatro Data Products analiticos.
+- **`tests/test_silver_contracts.py`**: Testes unitarios automatizados com fixtures compativeis com Databricks Connect e ambientes de CI/CD.

@@ -1,55 +1,79 @@
 # Cooperativa Nova Rota
 
-Plataforma analítica e de engenharia de dados concebida sobre o ecossistema **Databricks Lakehouse** e **Unity Catalog**, orientada pelo padrão de **Medallion Architecture (Bronze ➔ Silver ➔ Gold)**. 
+Proposta para uma pipeline de engenharia de dados, desenvolvida sobre a arquitetura do databricks e UC (Unity Catalog), estruturada seguindo o padrao medalhão (bronze, silver e gold).
 
-O projeto implementa uma esteira incremental orientada a contratos de dados, isolamento de anomalias em quarentena técnica, gestão histórica com **SCD Tipo 2 resiliente a conflitos de merge** e materialização de *data products* analíticos para acompanhamento transacional e financeiro de cooperados.
-
----
-
-## Arquitetura
-
-O ecossistema opera sob o namespace de três níveis do **Unity Catalog** (`novarota.<schema>.<tabela>`), eliminando caminhos físicos acoplados e centralizando governança, permissões e linhagem técnica:
-
-
-novarota.bronze.* ──── Raw, append-only, auditoria técnica e schema rescue (_rescued_data)
-
-novarota.silver.* ──── Dados limpos, dimensões históricas e quarentena de desvios
-
-novarota.gold.*   ──── Data Products de cooperados e liquidez por cana
-
-*Consulte a documentação técnica detalhada das decisões em [`docs/architecture.md`](docs/architecture.md) e [`docs/decisions.md`](docs/decisions.md).*
+O sistema implementa uma pipe de ingestao incremental orientada a contratos de dados, isolamento de registros nao conformes em quarentena tecnica, gestao de historico cadastral com SCD Tipo 2 desacoplado para eliminacao de conflitos de concorrencia em operacoes de merge, e materializacao de produtos de dados analiticos para consumo corporativo, prevencao a fraudes e modelagem estatistica.
 
 ---
 
-## Repositório:
+## Base da Arquitetura
+
+O ambiente opera sob o namespace de tres niveis do Unity Catalog (`novarota.<schema>.<tabela>`), garantindo isolamento logico, governanca centralizada de acessos e linhagem tecnica:
 
 ```text
-├── .github/workflows/       # Pipelines de CI/CD automatizados
-├── docs/                    # Documentação técnica e governança
-│   ├── architecture.md      # Topologia, fluxo de dados e governança no Unity Catalog
-│   ├── data_contracts.md    # Especificação dos contratos de dados e regras de quarentena
-│   └── decisions.md         # Architecture Decision Records (ADRs)
-├── notebooks/               # Cadernos de execução no Databricks
+                              [Fontes Transacionais / CDC]
+                                          |
+                                          v 
+                                Auto Loader (cloudFiles)
+
+                                 [ novarota.bronze.* ]
+
+        Ingestao append-only, metadados tecnicos e schema rescue (_rescued_data)
+                                          |
+                                          v 
+                      Contratos de Dados & SCD Tipo 2 (Expire + Append)
+
+                               [ novarota.silver.* ]
+
+             Dados tipados, dimensoes historicas e tabelas de quarentena
+                                          |
+                                          v 
+                    Resolucao Temporal & Agregacoes de Negocio
+
+                                 [ novarota.gold.* ]
+
+          Data Products analiticos (Fato Transacao, Metricas, Risco, Features)
+```
+**Documentacao tecnica complementar disponivel em:**
+   - docs/architecture.md: desenho arquitetural detalhado e fluxo de transformacao
+
+   - docs/data_contracts.md: especificacao de schemas, regras de validacao e quarentena
+
+   - docs/decisions.md: registros formais de decisao arquitetural
+
+---
+
+## O que você irá encontrar nesse repostório
+
+```
+├── .github/workflows/       # Esteiras de CI/CD para automacao e testes
+├── docs/                    # tecnica de engenharia e governanca
+│   ├── architecture.md      # linhagem e governanca no UC
+│   ├── data_contracts.md    # specs dos contratos e politicas de quarentena
+│   └── decisions.md         # ADRs
+├── notebooks/               # notebooks de execucao e demonstracao no databricks
 │   ├── bronze_ingestion.ipynb
 │   ├── silver_processing.ipynb
 │   └── gold_data_product.ipynb
-├── sql/                     # Consultas analíticas avançadas (Advanced Analytics)
+├── sql/                     # coonsultsas analiticas avancadas (Window Functions, CTEs)
 │   └── advanced_analytics.sql
-├── src/                     # Módulos Python reutilizáveis e testáveis
-│   ├── bronze/              # Helpers de ingestão e metadados
-│   ├── silver/              # Regras de qualidade, contratos e SCD Tipo 2
-│   └── gold/                # Regras de agregação dos data products
-├── tests/                   # Suíte de testes unitários
-├── config.py                # Configuração centralizada de catálogos e esquemas
+├── src/                     # codigo modular em py desacoplado de notebooks
+│   ├── bronze/              # metodos de ingestao e injecao de metadados
+│   ├── silver/              # validacao contratual, quarentena e algoritmo SCD2
+│   └── gold/                # regras de agregacao e construcao dos data products
+├── tests/                   # testes unitarios automatizados (em pytest)
+│   └── test_silver_contracts.py
+├── config.py                # parametrizacao de catalogos, esquemas e caminhos
+├── requirements.txt         # specs deterministica de dependencias py
 └── README.md
 ```
 ---
 
-## Orquestração e Pipeline (Databricks Workflows)
+## Definição da orquestracao e Pipeline (Databricks Workflows/Jobs)
 
-A esteira de processamento é orquestrada de forma sequencial no databricks através do job pipeline_lakehouse_cooperativa_novarota.
+O pipe é executado como um grafo direcionado (dag) sequencial no databricks Workflows por meio do job pipeline_lakehouse_cooperativa_novarota, com integracao direta a branch do git.
 
-Especificação Declarativa do Job:
+### Especificacao Declarativa do Job (em yaml)
 
 ```YAML
 resources:
@@ -94,61 +118,128 @@ resources:
 
       performance_target: PERFORMANCE_OPTIMIZED
 ```
+---
+## Decisoes para a arquitetura e engenharia
+
+### Bronze (novarota.bronze)
+
+  - Ingestao incremental baseada em Databricks auto load ```(format("cloudFiles"))```, orientada por checkpoints no armazenamento em nuvem, eliminando overhead de listagem recursiva de diretorios
+
+  - Resiliencia a quebra de contratos via coluna tecnica ```_rescued_data```, preservando campos nao mapeados para auditoria sem abortar o processamento
+
+  - Ingecao padronizada de metadados de auditoria forense: ```_timestamp_ingestao```, ```_arquivo_origem```, ```_batch_id``` e ```_hash_linha```
+
+### Silver (novarota.silver)
+
+- Inspecao contratual orientada ao padrao nonbreaking pipeline: registros em desacordo com as regras de tipagem ou valores permitidos sao direcionados para ```quarentena_clientes``` e ```quarentena_transacoes```, com descricao do erro em ```motivo_quarentena``` e ```timestamp``` de deteccao.
+
+- Algoritmo de slwo changing dimensions (SCD2) desacoplado em padrao expir + append para eliminar o erro ```DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE```:
+
+    - Deduplicacao intra lote utilizando funcao de janela particionada por id_cliente e ordenada por data_atualizacao DESC
+
+    - Etapa 1: Merge unicamente com clausula UPDATE para expirar versoes vigentes que sofreram alteracao de atributos de negocio ```flag_ativo = false, data_fim_vigencia = ts```
+
+    - Etapa 2: Append direto das novas versoes vigentes caso seja constatada mutacao cadastral via hash criptografico SHA-256 ```_hash_diff```
+
+### Camada Gold (novarota.gold)
+
+  **novarota.gold.gold_fato_transacao:**
+
+   - granularidade: uma linha por transacao (id_transacao).
+
+   - rules: Resolucao relacional em cascata (transacao -> cartao -> conta -> cooperado), join temporal pontual (point-in-time) com a dimensao de cooperados, abatimento integral de estornos no montante liquido (valor_liquido = 0.00 em transacoes estornadas) e enriquecimento de severidade de risco
+
+  **novarota.gold.gold_cliente_mes:**
+
+   - granularidade: Uma linha por cooperado e mes de referencia (id_cliente, ano_mes).
+
+   - metricas: Volume bruto e liquido, quantidade de transacoes por status (aprovadas, negadas, estornadas), ticket medio liquido e dispersao de canais de atendimento
+
+  **novarota.gold.gold_indicadores_risco:**
+
+   - granularidade: Uma linha por canal e mes (ano_mes, canal)
+
+   - metricas: Percentual de incidentes de risco, taxa de estorno e volumetria de alertas com severidade alta
+
+  **novarota.gold.gold_features_cliente:**
+
+   - granularidade: Uma linha por cooperado ativo (id_cliente)
+
+   - Tabela analitica para algoritmos de Machine Learning (media de gastos, desvio padrao amostral, maxima transacao historica, taxa de recusa operacional e recencia transacional em dias)
 
 ---
 
-### Governança no Unity Catalog
+## Testes
 
-Separação entre bronze (imutável), silver (limpeza/conformidade) e gold (consumo).
-Rastreabilidade e linhagem ponta a ponta registradas nativamente.
+O projeto contem testes unitarios implementados com pytest em ```tests/test_silver_contracts.py```, estruturados com fixtures compativeis tanto com clusters Databricks gerenciados (Spark Connect) quanto com ambientes locais e esteiras de CI/CD.
 
-### Ingestão Incremental
+Cenarios cobertos:
 
-- Utilização do formato ```cloudFiles``` para absorção eficiente de arquivos novos via notificações e logs internos de ficheiros.
-- Tolerância a alterações de esquema na fonte através da coluna técnica ```_rescued_data```.
-- Enriquecimento com metadados de auditoria ```_timestamp_ingestao```, ```_arquivo_origem``` ,```_batch_id```, ```_hash_linha```.
+  - Validacao de regras contratuais e roteamento para quarentena tecnica com preservacao de integridade
 
-### Contratos de dados e quarentena
-
-- Validação de integridade sem interromper a esteira (non-breaking pipelines): dados que violam contratos não são descartados silenciosamente nem causam falha crítica no job. São roteados para ```novarota.silver.quarentena_*``` com marcação de ```motivo_quarentena``` e ```timestamp``` de auditoria.
-
-### SCD Tipo 2 Desacoplado (Padrão expire + append)
-
-- Prevenção de conflitos ```DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE``` comuns em fontes CDC com múltiplos eventos por chave no mesmo lote.
-- Aplicação de deduplicação temporal em janela ```(Window.partitionBy("id_cliente").orderBy(data_atualizacao.desc()))```, seguida de expiração atômica (passo 1: MERGE de update $1 \times 1$) e inserção atômica (passo 2: append seguro apenas quando há mutação de atributos de negócio detectada via hash SHA-256).
-
-### Resolução de chaves na camada gold
-
-- Resolução da linhagem referencial complexa entre transações e cooperados via de-para temporal: ```silver_transacoes ➔ bronze_cartoes_cdc ➔ bronze_contas_cdc ➔ id_cliente```.
+  - Deteccao deterministica de alteracao em atributos de negocio via calculo de _hash_diff
 
 ---
 
-## Como Executar o Projeto
+# Instrucoes de Execucao
 
-#### Pré-requisitos
+### Pre-requisitos
 
-- Workspace Databricks habilitado com Unity Catalog.
+- Databricks com suporte a Unity Catalog ativo
+- Recurso computacional alocado (serverless ou cluster runtime 14+).
+- Repositorio clonado via databricks Git folders
 
-- Cluster atribuído ou recurso de computação Serverless ativo.
+#### 1- Execucao Automatizada (databricks workflows)
 
-- Repositório sincronizado via Databricks Git Folders.
+1. No menu databricks, acesse a secao **Workflows** > **Jobs**
+2. Selecione o job `pipeline_lakehouse_cooperativa_novarota`
+3. Clique em **Run now** para acionar o DAG completo (`bronze_ingestion` -> `silver_processing` -> `gold_data_product`)
 
-#### Passo a Passo de Execução
+#### 2- Execucao Manual (desenvolvimento)
 
-**1 - Execução Manual (Ambiente de Desenvolvimento):**
-- Execute notebooks/bronze_ingestion.ipynb para carregar as tabelas brutas.
+Para execucoes interativas via notebooks:
 
-- Execute notebooks/silver_processing.ipynb para aplicar contratos de qualidade, quarentena e a atualização SCD Tipo 2 na dimensão de cooperados.
+1. `notebooks/bronze_ingestion.ipynb`: consumo incremental das fontes e persistencia brutq
+2. `notebooks/silver_processing.ipynb`: validacao de contratos, quarentena e ingestao dimensional SCD Tipo 2
+3. `notebooks/gold_data_product.ipynb`: construcao das tabelas analiticas
 
-- Execute notebooks/gold_data_product.ipynb para materializar as tabelas analíticas gold_metricas_cooperados e gold_desempenho_canais.
+#### 3- Consultas Analiticas Avancadas
 
-**2 - Execução Automatizada via Workflow (Homologação / Produção):**
+Execute as consultas contidas em `sql/advanced_analytics.sql` no SQL Editor do Databricks para:
 
-- No Databricks, acesse o menu lateral Workflows > Jobs.
+- Calculo de variacao percentual mes contra mes (MoM) com `LAG`
+- Identificacao de primeiro e ultimo canal transacionado com `FIRST_VALUE` e `LAST_VALUE`
+- Segmentacao de cooperados em decis financeiros com `NTILE` e `PERCENT_RANK`
+- Deteccao de desvios e anomalias de consumo baseada em multiplicador de media historica
+- Benchmark de cooperado frente ao seu grupo de comparacao (cidade e segmento)
+- Atualizacao incremental em Delta Lake utilizando sintaxe declarativa `MERGE INTO`
 
-- Abra o job pipeline_lakehouse_cooperativa_novarota.
+--- 
 
-- Clique em Run now para acionar a execução do DAG em lote.
+## Governanca, Performance e Trade-offs
 
-**3 - Extração de Insights Analíticos:**
-- Execute as consultas de negócio estruturadas em sql/advanced_analytics.sql no SQL Editor para analisar métricas de ranking de cooperados, taxas de estorno e safras de adesão.
+- Liquid Clustering: Para a tabela `gold_fato_transacao`, em cenarios de crescimento acentuado de volume, recomenda-se a adocao de Liquid Clustering (`CLUSTER BY (data_referencia, id_cliente)`) em substituicao ao particionamento estatico, evitando degradacao por criacao excessiva de arquivos pequenos (*small files*).
+- Politica de Controle de Acesso (Unity Catalog): Segregacao estrita entre camadas de dados baseada em papeis:SQL
+    
+    ```
+    GRANT USAGE ON CATALOG novarota TO `bi_analysts`;
+    GRANT SELECT ON SCHEMA novarota.gold TO `bi_analysts`;
+    REVOKE ALL PRIVILEGES ON SCHEMA novarota.bronze FROM `bi_analysts`;
+    ```
+    
+- Observabilidade: Monitoramento de SLAs de processamento e limites operacionais via alertas configurados no Databricks Workflows, com notificacoes acionadas quando a taxa de linhas retidas em quarentena exceder limites parametricos predefinidos.
+
+--- 
+## Governanca, performance e Trade-off
+
+- Para a tabela `gold_fato_transacao`, em cenarios de crescimento acentuado de volume, recomenda-se a adocao de Liquid Clustering (`CLUSTER BY (data_referencia, id_cliente)`) em substituicao ao particionamento estatico, evitando degradacao por criacao excessiva de arquivos pequenos (*small files*)
+
+- Politica de Controle de Acesso (Unity Catalog): Segregacao estrita entre camadas de dados baseada em papeis:
+    
+    ```SQL
+    GRANT USAGE ON CATALOG novarota TO `bi_analysts`;
+    GRANT SELECT ON SCHEMA novarota.gold TO `bi_analysts`;
+    REVOKE ALL PRIVILEGES ON SCHEMA novarota.bronze FROM `bi_analysts`;
+    ```
+    
+- observabilidade: monitoramento de SLAs de processamento e limites operacionais via alertas configurados no Databricks, com notificacoes acionadas quando a taxa de linhas retidas em quarentena exceder limites parametricos predefinidos

@@ -1,0 +1,41 @@
+{
+  "evaluation": {
+    "source": {
+      "name": "status_qualidade",
+      "display": "status_qualidade",
+      "aggregation": "AGGREGATION_UNSPECIFIED"
+    },
+    "comparison_operator": "EQUAL",
+    "threshold": {
+      "value": {
+        "string_value": "CRITICO"
+      }
+    },
+    "notification": {}
+  },
+  "query_lines": [
+    "WITH total_ingestao AS (",
+    "    SELECT COUNT(1) AS qtd_total",
+    "    FROM novarota.bronze.bronze_clientes_cdc",
+    "    WHERE DATE(_timestamp_ingestao) = CURRENT_DATE()",
+    "),",
+    "total_quarentena AS (",
+    "    SELECT COUNT(1) AS qtd_rejeitados",
+    "    FROM novarota.silver.quarentena_clientes",
+    "    WHERE DATE(_data_quarentena) = CURRENT_DATE()",
+    ")",
+    "SELECT ",
+    "    t.qtd_total,",
+    "    q.qtd_rejeitados,",
+    "    ROUND(",
+    "        (COALESCE(q.qtd_rejeitados, 0) / NULLIF(t.qtd_total, 0)) * 100, ",
+    "        2",
+    "    ) AS taxa_rejeicao_percentual,",
+    "    CASE ",
+    "        WHEN (COALESCE(q.qtd_rejeitados, 0) / NULLIF(t.qtd_total, 0)) * 100 > 10.0 THEN 'CRITICO'",
+    "        ELSE 'NORMAL'",
+    "    END AS status_qualidade",
+    "FROM total_ingestao t",
+    "CROSS JOIN total_quarentena q"
+  ]
+}

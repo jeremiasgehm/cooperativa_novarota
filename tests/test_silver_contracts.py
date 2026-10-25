@@ -18,16 +18,14 @@ def spark():
     Obtem a sessao Spark existente no Databricks (Spark Connect)
     ou instancia uma sesso local se estiver rodando em CI/CD/maquina local
     """
-    # 1. Se estiver rodando dentro do Databricks / Spark Connect
+
     if "SPARK_REMOTE" in os.environ or "spark.remote" in os.environ:
         return SparkSession.builder.getOrCreate()
 
-    # 2. Se já existir uma sessão ativa no driver
     active = SparkSession.getActiveSession()
     if active is not None:
         return active
 
-    # 3. Fallback estritamente local (máquina física / GitHub Actions fora do Databricks)
     return (
         SparkSession.builder.master("local[1]")
         .appName("test-cooperativa-novarota")
